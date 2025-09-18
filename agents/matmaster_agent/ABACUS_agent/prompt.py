@@ -31,7 +31,7 @@ A typical workflow is:
 4. Do property calculations like phonon dispersion, band, etc.
 
 Since we use asynchronous job submission in this agent, **ONLY 1 TOOL FUNCTION** should be used for 1 step. **DO NOT USE abacus_collect_data
-AND abacus_prepare_inputs_from_relax_results UNLESS EXPLITY REQUESTED**.
+**UNLESS EXPLITY REQUESTED**.
 
 Since ABACUS calculation uses not only structure file, but also INPUT file contains parameters controlling its calculation and pseudopotential and orbital
 files used in DFT calculation, a necessary step is to prepare an ABACUS inputs directory containing structure file, INPUT, pesudopotential and orbital files.
@@ -45,12 +45,15 @@ Used to generate ABACUS input files from a given structure file.
 - abacus_prepare: Prepare ABACUS input file directory from structure file and provided information.
     Must be used when only structure file is avaliable (in cif, poscar or abacus/stru format) and obtaining property from ABACUS calculation is requested.
 - abacus_modify_input: Modify ABACUS INPUT file in prepared ABACUS input file directory.
-    Should only be used when abacus_prepare is finished.
+    Should only be used after abacus_prepare is finished.
 - abacus_modify_stru: Modify ABACUS STRU file in prepared ABACUS input file directory.
-    Should only be used when abacus_prepare is finished.
+    Should only be used after abacus_prepare is finished.
 
 Property calculations:
 The following tool functions **MUST** use ABACUS inputs directory from abacus_prepare as an argument, and using a structure file is **STRICTLY FORBIDDEN**.
+These tool functions will do all necessary steps by themselves, and no extra calculation is needed to be done befor calling any of the tool functions.
+For example, abacus_cal_band will do an SCF calculation itself, and do not use abacus_calculation_scf before using abacus_cal_band.
+After these tool function is finished, work directory and desired calculation will be in the returned dictionary.
 - abacus_calculation_scf: Do a SCF calculation using the given ABACUS inputs directory.
 - abacus_do_relax: Do relax (only relax the position of atoms in a cell) or cell-relax (relax the position of atoms and lattice parameters simutaneously)
     for a given structure. abacus_phonon_dispersiton should only be used after using this function to do a cell-relax calculation,
@@ -67,10 +70,10 @@ The following tool functions **MUST** use ABACUS inputs directory from abacus_pr
 - abacus_cal_charge_density_difference: Calculate the charge density difference of a given system divided into to subsystems.
     Atom indices should be explicitly requested if not certain.
 - abacus_cal_spin_density: Calculate the spin density of given  structure. A cube file containing the spin density will be returned.
-- abacus_dos_run: Calculate the DOS and PDOS of the given structure. Support non-magnetic and collinear spin-polarized now.
+- abacus_dos_run: Calculate the DOS and PDOS of the given structure. Support non-spin-polarized and collinear spin-polarized calculation now.
     Support 3 modes to plot PDOS: 1. Plot PDOS for each element; 2. Plot PDOS for each shell of each element (d orbital for Pd for example),
     3. Plot PDOS for each orbital of each element (p_x, p_y and p_z for O for example). Path to plotted DOS and PDOS will be returned.
-- abacus_cal_elastic: Calculate elastic tensor (in Voigt notation) and related bulk modulus, shear modulus and young's modulus and
+- abacus_cal_elastic: Calculate elastic tensor (in Voigt notation) and related bulk modulus, shear moduluss, young's modulus and
     Poisson ratio from elastic tensor.
 - abacus_eos: Fit Birch-Murnaghan equation of state for cubic crystal. This function should only be used for cubic crystal.
 - abacus_phonon_dispersion: Calculate phonon dispersion curve for bulk material. Currently 2D material is not supported.
@@ -80,8 +83,9 @@ The following tool functions **MUST** use ABACUS inputs directory from abacus_pr
 - abacus_run_md: Run ab-inito molecule dynamics calculation using ABACUS.
 
 Result collection:
-Most tool function will return the calculated property directly, and **NO ANY MORE** steps are needed. The tool function abacus_collect_data
-**SHOULD ONLY BE USED** after calling tool function abacus_calculation_scf and abacus_do_relax finished.
+Most tool function will return the calculated property directly, and **NO ANY MORE** steps are needed.
+The tool function abacus_collect_data **SHOULD ONLY BE USED** after calling tool function
+abacus_calculation_scf and abacus_do_relax finished.
 """
 
 

@@ -75,7 +75,8 @@ class ABACUSCalculatorAgent(BaseAsyncJobAgent):
             sync_tools=['abacus_prepare',
                         'abacus_modify_input',
                         'abacus_modify_stru',
-                        'abacus_collect_data']
+                        'abacus_collect_data'],
+            enable_tgz_unpack=False
         )
 
 def init_abacus_calculation_agent(llm_config) -> BaseAgent:
