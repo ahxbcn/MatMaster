@@ -1,3 +1,4 @@
+import logging
 import traceback
 import uuid
 from typing import Iterable
@@ -9,6 +10,8 @@ from google.genai.types import Content, FunctionCall, FunctionResponse, Part
 
 from agents.matmaster_agent.constant import ModelRole
 from agents.matmaster_agent.utils.helper_func import update_session_state
+
+logger = logging.getLogger(__name__)
 
 
 # event check funcs
@@ -141,7 +144,7 @@ def context_function_response_event(ctx: InvocationContext, author: str, functio
 
 def context_function_event(ctx: InvocationContext, author: str, function_call_name: str, response: Optional[dict],
                            role: str, args: Optional[dict] = None):
-    function_call_id = f"call_{str(uuid.uuid4()).replace('-', '')[:24]}"
+    function_call_id = f"added_{str(uuid.uuid4()).replace('-', '')[:24]}"
     yield context_function_call_event(ctx, author, function_call_id, function_call_name, role, args)
     yield context_function_response_event(ctx, author, function_call_id, function_call_name, response, role)
 
@@ -150,8 +153,9 @@ def context_multipart2function_event(ctx: InvocationContext, author: str, event:
     for part in event.content.parts:
         if part.text:
             yield from context_function_event(ctx, author, function_call_name, {'msg': part.text},
-                                                         ModelRole)
+                                              ModelRole)
         elif part.function_call:
+            logger.warning(f"[context_multipart2function_event] function_name = {part.function_call.name}")
             yield context_function_call_event(ctx, author, function_call_id=part.function_call.id,
                                               function_call_name=part.function_call.name, role=ModelRole,
                                               args=part.function_call.args)
@@ -161,6 +165,18 @@ def context_multipart2function_event(ctx: InvocationContext, author: str, event:
 def all_text_event(ctx: InvocationContext, author: str, text: str, role: str):
     yield frontend_text_event(ctx, author, text, role)
     yield context_text_event(ctx, author, text, role)
+
+
+def cherry_pick_events(ctx: InvocationContext):
+    events = ctx.session.events
+    cherry_pick_parts = []
+    for event in events:
+        if event.content:
+            for part in event.content.parts:
+                if part.text:
+                    cherry_pick_parts.append((event.content.role, part.text))
+
+    return cherry_pick_parts
 
 
 async def send_error_event(err, ctx: InvocationContext, author):

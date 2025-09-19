@@ -12,6 +12,7 @@ from agents.matmaster_agent.structure_generate_agent.constant import StructureGe
 from agents.matmaster_agent.superconductor_agent.constant import SuperconductorAgentName
 from agents.matmaster_agent.thermoelectric_agent.constant import ThermoelectricAgentName
 from agents.matmaster_agent.traj_analysis_agent.constant import TrajAnalysisAgentName
+from agents.matmaster_agent.document_parser_agent.constant import DocumentParserAgentName
 
 GlobalInstruction = """
 ---
@@ -416,17 +417,13 @@ Any progress or completion message without an actual sub-agent call IS A CRITICA
     - Purpose: Retrieve crystal structure data by coordinating multiple sub-agents:
      * `bohrium_public_agent` → for Bohrium Public database (formula, elements, space group, atom counts, band gap, formation energy)
      * `optimade_agent` → for OPTIMADE-compliant providers (broad, logic filters, space-group, band-gap queries)
-     * `openlam_agent` → for OpenLAM internal database (formula, energy window, submission time)
-    - By default, queries **all sub-agents ** and merges results
+    - By default, MrDice analyzes the query and selects the **most suitable sub-agent** to handle it.
+    - If multiple agents are clearly required by user(e.g., different filters span different capabilities), MrDice executes them **sequentially** and merges results.
     - Capabilities:
       - Space group, atom count, band gap, formation energy queries (Bohrium Public)
       - Element/space-group/band-gap/logic-based queries (OPTIMADE)
       - Formula-based, energy-based, time-based queries (OpenLAM)
       - Unified Markdown table with merged results
-    - Example Queries:
-      - "找 Fe2O3 的晶体结构"
-      - "查找能量在 -10 到 20 eV 之间的材料"
-      - "找到含铝的、能带在 1.0–2.0 eV 之间的材料"
 
    ## RESPONSE FORMAT
    The response must always have three parts in order:
@@ -438,7 +435,6 @@ Any progress or completion message without an actual sub-agent call IS A CRITICA
    - The table must contain **all retrieved materials** in one complete Markdown table, without omissions, truncation, summaries, or ellipses.
    - The number of rows must exactly equal `n_found`, and even if there are many results, they must all be shown in the same table.
    - The 📦 archive link is supplementary and can never replace the full table.
-   - 表格中必须包含**所有检索到的材料**，必须完整列在一个 Markdown 表格中，绝对不能省略、缩写、总结或用“...”只展示部分，你必须展示全部检索到的材料在表格中！即使结果数量很多，也必须全部列出。📦 压缩包链接只能作为补充，绝不能替代表格。
    ### Adjustment Rules
    - If the user requests modifications to the table after retrieval (e.g., adding lattice constants, density, symmetry operations, or removing certain fields), this request must be passed to **MrDice**.
    - **MrDice** will then instruct the relevant sub-agents to supplement or adjust the table using their already-returned results.
@@ -482,6 +478,20 @@ Any progress or completion message without an actual sub-agent call IS A CRITICA
       - Geometry optimization, molecular dynamics
       - Property calculations: band structure, phonon spectrum, elastic properties, DOS/PDOS, Bader charge
       - Result collection from ABACUS job directories
+
+15. **{DocumentParserAgentName}** - **Materials science document parser**
+    - Purpose: Extract materials science data from scientific documents and web pages
+    - Capabilities:
+      - Parse chemical compositions, crystal structures, and physical properties from documents
+      - Convert document data into structured formats
+      - Parse web pages for materials science data
+    - Supported Formats:
+      PDF-format documents or web pages.
+      Note that ALL files are link forms. You should distinguish between web pages and document links by their URL patterns or file extensions.
+    - Example Queries:
+      - "这个文献里面计算的材料用的是什么结构？"
+      - "分析附件中的实验报告，提取所有提到的材料及其性能"
+      - "从这个网页中提取有关石墨烯的性能数据"
 
 ## CRITICAL RULES TO PREVENT HALLUCINATION
 0. Strictly follow the rules below UNLESS the USERS explicitly instruct you to break them.
@@ -653,46 +663,35 @@ def gen_result_agent_description():
 
 def gen_params_check_completed_agent_instruction():
     return """
-Analyze the most recent message where the 'author' field ends with '_agent' and which contains parameter information. This message may not be the immediate preceding one.
-Your task is to determine if the parameters requiring user confirmation have been fully presented and a confirmation is being requested in that message.
+Your task is to determine if the parameters requiring user confirmation have been fully presented and a confirmation has been confirmed in the `context messages`.
+Analyze the `context_messages` from [User] and [Model] listed below (only listed Latest 5 messages):
+
+Context Messages (Including User and Model Conversation. The most recent conversation is at the bottom):
+------------------
+{context_messages}
+------------------
 
 Your output MUST be a valid JSON object with the following structure:
 {{
     "flag": <boolean>,
-    "reason": <string>,  // *Present reason if flag is False, else return empty string*
-    "analyzed_message": <string>  // *Quote the specific message snippet that was analyzed to make this determination.*
+    "reason": <string>, //  *A concise explanation of the reasoning behind the judgment, covering both positive and negative evidence found in the context messages. Return empty string only if there is absolutely no relevant content to analyze.*
+    "analyzed_message": List[<string>]  // *Quote the key messages that were analyzed to make this determination.*
 }}
 
 Return `flag: true` ONLY IF ALL of the following conditions are met:
-1.  The message explicitly and finally lists all parameters that need user confirmation (e.g., element, structure type, dimensions).
-2.  The message's intent is to conclude the parameter collection phase and advance the conversation to the next step (typically, awaiting a "yes" or "no" response from the user to proceed with an action).
-3.  The message does not indicate that the parameter discussion is still ongoing (e.g., lacks phrases like "also need," "next, please provide," "what is the...").
+1.  The context messages explicitly and finally list all parameters that user confirmed (e.g., element, structure type, dimensions).
+2.  The context messages's intent is to conclude the parameter collection phase and advance the conversation to the next step.
+3.  The context messages does not indicate that the parameter discussion is still ongoing (e.g., lacks phrases like "also need," "next, please provide," "what is the...").
 
 Return `flag: false` in ANY of these cases:
-1.  The message does not mention any specific parameters to confirm.
-2.  The message is asking for or soliciting new parameter information (e.g., "What element would you like?", "Please provide the lattice constant.").
-3.  The message states or implies that parameter collection is not yet finished and further questions will follow.
+1.  The context messages don't mention any specific parameters to confirm.
+2.  The context messages are asking for or soliciting new parameter information (e.g., "What element would you like?", "Please provide the lattice constant.").
+3.  The context messages state or imply that parameter collection is not yet finished and further questions will follow.
 4.  There are currently no parameters awaiting user confirmation.
-   *   For any of these cases, the "reason" field must be populated with a concise explanation based on the violated condition(s).*
 
 **语言要求 (Language Requirement):** 在输出JSON时，请观察对话上下文使用的主要语言。如果上下文主要是中文，那么`reason`字段必须用中文书写。如果上下文主要是英文或其他语言，则使用相应的语言。请确保语言选择与对话上下文保持一致。
 
-**Critical Guidance:** The act of clearly listing parameters and explicitly asking for confirmation (e.g., "Please confirm the following parameters:...") is considered the completion of the parameter presentation task. Therefore, return `true` for the message where that request is made, NOT after the user has confirmed. Look for the most recent message where parameters are presented for confirmation, even if it's not the very last message.
-
-**Examples:**
-- Message: "Please confirm the following parameters to build the FCC copper crystal: Element: Copper (Cu), Structure: FCC, using default lattice parameters. Please confirm if this is correct?"
-  - **Analysis:** Parameters are explicitly listed (Cu, FCC), and a confirmation is requested to proceed. Collection is concluded.
-  - **Output:** {{"flag": true, "reason": "", "analyzed_message": "Please confirm the following parameters to build the FCC copper crystal: Element: Copper (Cu), Structure: FCC, using default lattice parameters. Please confirm if this is correct?"}}
-
-- Message: "To build the crystal, what element should I use?"
-  - **Analysis:** This is a request for a new parameter, not a request for confirmation of existing ones. (Violates Condition 2 for 'true' / Matches Condition 2 for 'false')
-  - **Output (英文上下文):** {{"flag": false, "reason": "Message is soliciting new parameter information ('what element') rather than requesting confirmation.", "analyzed_message": "To build the crystal, what element should I use?"}}
-  - **Output (中文上下文):** {{"flag": false, "reason": "消息正在征求新的参数信息（'使用什么元素'），而不是请求确认。", "analyzed_message": "To build the crystal, what element should I use?"}}
-
-- Message: "Element is set to Copper. Now, what is the desired lattice constant?"
-  - **Analysis:** One parameter is noted, but the conversation is actively moving to collect the next parameter. Collection is not concluded. (Violates Condition 1 and 3 for 'true' / Matches Condition 3 for 'false')
-  - **Output (英文上下文):** {{"flag": false, "reason": "Parameter collection is not finished; the message is asking for the next parameter ('lattice constant').", "analyzed_message": "Element is set to Copper. Now, what is the desired lattice constant?"}}
-  - **Output (中文上下文):** {{"flag": false, "reason": "参数收集未完成；消息正在询问下一个参数（'晶格常数'）。", "analyzed_message": "Element is set to Copper. Now, what is the desired lattice constant?"}}
+**Critical Guidance:** The act of clearly listing parameters and explicitly confirmed is considered the completion of the parameter presentation task. Therefore, return `true` for the message where that request is made, NOT after the user has confirmed.
 
 Based on the rules above, output a JSON object.
 """
@@ -738,15 +737,25 @@ RESPONSE TEXT (previous LLM's response to evaluate):
 Provide your evaluation in the following JSON format:
 {{
     "is_transfer": <true or false>,
-    "target_agent": "xxx agent" (if transfer detected) or null (if no transfer)
+    "target_agent": "xxx agent" (if transfer detected) or null (if no transfer),
+    "reason": <string> // *A concise explanation of the reasoning behind the judgment, covering both positive and negative evidence found in the response text. Return empty string only if there is absolutely no relevant content to analyze.*
 }}
 
 Examples for reference:
-- Case1 (false): "使用结构生成智能体（structure_generate_agent）根据用户要求创建 FCC Cu 的块体结构" - only mentions agent, no transfer action
-- Case2 (true): "正在转移到structure_generate_agent进行结构生成" - explicit transfer action with target agent
-- Case3 (true): "I will now use the structure_generate_agent to create the bulk structure" - immediate action with target agent
-- Case4 (false): "Next I will generate the Pt bulk structure" - no agent transfer mentioned
-- Case5 (true): `{{"agent_name":"traj_analysis_agent"}}` - explicit JSON object instructing transfer
+- Case1 (false): "使用结构生成智能体（structure_generate_agent）根据用户要求创建 FCC Cu 的块体结构"
+  -> Reason: "Only mentions the agent's function but lacks any explicit transfer verbs or immediate action indicators."
+
+- Case2 (true): "正在转移到structure_generate_agent进行结构生成"
+  -> Reason: "Contains explicit transfer phrase '正在转移到' (transferring to) followed by a clear target agent name."
+
+- Case3 (true): "I will now use the structure_generate_agent to create the bulk structure"
+  -> Reason: "Uses immediate action indicator 'I will now use' followed by a specific agent name, demonstrating transfer intent."
+
+- Case4 (false): "Next I will generate the Pt bulk structure"
+  -> Reason: "Describes a future action but does not mention any agent or transfer mechanism."
+
+- Case5 (true): `{{"agent_name":"traj_analysis_agent"}}`
+  -> Reason: "Standalone JSON object with an 'agent_name' key is an explicit programmatic instruction to transfer."
 """
 
 

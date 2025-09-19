@@ -4,12 +4,11 @@ import os
 from typing import AsyncGenerator, override, Optional
 
 import jsonpickle
+import litellm
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
-from mcp.types import CallToolResult
-from pydantic import Field, BaseModel
-from yaml.scanner import ScannerError
+from pydantic import Field
 
 from agents.matmaster_agent.base_agents.callback import check_before_tool_callback_effect, default_before_tool_callback, \
     catch_before_tool_callback_error, check_job_create, inject_username_ticket, inject_ak_projectId, \
@@ -33,8 +32,7 @@ from agents.matmaster_agent.constant import (
     get_BohriumStorage,
     get_DFlowExecutor, OpenAPIJobAPI,
 )
-from agents.matmaster_agent.llm_config import MatMasterLlmConfig
-from agents.matmaster_agent.model import BohrJobInfo, DFlowJobInfo
+from agents.matmaster_agent.model import BohrJobInfo, DFlowJobInfo, ParamsCheckComplete
 from agents.matmaster_agent.prompt import (
     ResultCoreAgentDescription,
     SubmitRenderAgentDescription, gen_submit_core_agent_description, gen_submit_core_agent_instruction,
@@ -43,7 +41,7 @@ from agents.matmaster_agent.prompt import (
 )
 from agents.matmaster_agent.utils.event_utils import is_function_call, is_function_response, send_error_event, is_text, \
     context_function_event, all_text_event, context_text_event, frontend_text_event, is_text_and_not_bohrium, \
-    get_function_call_indexes, context_multipart2function_event
+    get_function_call_indexes, context_multipart2function_event, cherry_pick_events
 from agents.matmaster_agent.utils.frontend import get_frontend_job_result_data
 from agents.matmaster_agent.utils.helper_func import update_session_state, parse_result, get_session_state, \
     load_tool_response
@@ -217,12 +215,6 @@ class CalculationMCPLlmAgent(HandleFileUploadLlmAgent):
         except BaseException as err:
             async for error_event in send_error_event(err, ctx, self.name):
                 yield error_event
-
-
-class ParamsCheckComplete(BaseModel):
-    flag: bool
-    reason: str
-    analyzed_message: str
 
 
 class ParamsCheckCompletedAgent(LlmAgent):
@@ -528,7 +520,6 @@ class ResultTransferLlmAgent(LlmAgent):
 class BaseAsyncJobAgent(LlmAgent):
     submit_agent: SequentialAgent
     result_agent: SequentialAgent
-    params_check_completed_agent: LlmAgent
     params_check_info_agent: LlmAgent
     dflow_flag: bool = Field(False, description='Whether the agent is dflow related', exclude=True)
     supervisor_agent: str
@@ -594,16 +585,6 @@ class BaseAsyncJobAgent(LlmAgent):
             sub_agents=[result_core_agent]
         )
 
-        params_check_completed_agent = ParamsCheckCompletedAgent(
-            model=MatMasterLlmConfig.gpt_4o,
-            # model=model,
-            name=f"{agent_prefix}_params_check_completed_agent",
-            instruction=gen_params_check_completed_agent_instruction(),
-            output_schema=ParamsCheckComplete,
-            disallow_transfer_to_parent=True,
-            disallow_transfer_to_peers=True
-        )
-
         params_check_info_agent = ParamsCheckInfoAgent(
             model=model,
             name=f"{agent_prefix}_params_check_info_agent",
@@ -621,10 +602,9 @@ class BaseAsyncJobAgent(LlmAgent):
             description=agent_description,
             submit_agent=submit_agent,
             result_agent=result_agent,
-            params_check_completed_agent=params_check_completed_agent,
             params_check_info_agent=params_check_info_agent,
             dflow_flag=dflow_flag,
-            sub_agents=[submit_agent, result_agent, params_check_completed_agent, params_check_info_agent],
+            sub_agents=[submit_agent, result_agent, params_check_info_agent],
             supervisor_agent=supervisor_agent,
             sync_tools=sync_tools,
             enable_tgz_unpack=enable_tgz_unpack
@@ -651,24 +631,28 @@ class BaseAsyncJobAgent(LlmAgent):
         ):  # Only Query Job Result
             pass
         else:
-            last_params_check_completed_event = None
-            async for params_check_completed_event in self.params_check_completed_agent.run_async(ctx):
-                last_params_check_completed_event = params_check_completed_event
-            params_check_completed_json = json.loads(last_params_check_completed_event.content.parts[0].text)
+            cherry_pick_parts = cherry_pick_events(ctx)[-5:]
+            context_messages = '\n'.join([f'<{item[0].title()}> said: \n{item[1]}\n' for item in cherry_pick_parts])
+            logger.info(f"[BaseAsyncJobAgent] context_messages = {context_messages}")
+
+            prompt = gen_params_check_completed_agent_instruction().format(context_messages=context_messages)
+            response = litellm.completion(model='azure/gpt-4o', messages=[{'role': 'user', 'content': prompt}],
+                                          response_format=ParamsCheckComplete)
+            params_check_completed_json: dict = json.loads(response.choices[0].message.content)
             params_check_completed = params_check_completed_json['flag']
             params_check_reason = params_check_completed_json['reason']
-            params_check_msg = params_check_completed_json['analyzed_message']
+            params_check_msg = params_check_completed_json['analyzed_messages']
+
+            # 包装成function_call，来避免在历史记录中展示；同时模型可以在上下文中感知
+            for params_check_reason_event in context_function_event(ctx, self.name,
+                                                                    'system_params_check_result',
+                                                                    {'complete': params_check_completed,
+                                                                     'reason': params_check_reason,
+                                                                     'analyzed_messages': params_check_msg},
+                                                                    ModelRole):
+                yield params_check_reason_event
 
             if not params_check_completed:
-                # Tell User Why Params Check Uncompleted
-                # 包装成function_call，来避免在历史记录中展示；同时模型可以在上下文中感知
-                for params_check_reason_event in context_function_event(ctx, self.name,
-                                                                        'system_params_check_block_reason',
-                                                                        {'reason': params_check_reason,
-                                                                         'analyzed_message': params_check_msg},
-                                                                        ModelRole):
-                    yield params_check_reason_event
-
                 # Call ParamsCheckInfoAgent to generate params needing check
                 async for params_check_info_event in self.params_check_info_agent.run_async(ctx):
                     yield params_check_info_event
